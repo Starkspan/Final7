@@ -3,111 +3,103 @@ const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
 const pdf = require("pdf-parse");
+
 const app = express();
-const port = process.env.PORT || 10000;
-const upload = multer();
-
 app.use(cors());
-app.use(express.json());
+const upload = multer({ storage: multer.memoryStorage() });
 
-app.post("/pdf/analyze", upload.single("pdf"), async (req, res) => {
+app.post("/pdf/analyze", upload.single("file"), async (req, res) => {
   try {
     const dataBuffer = req.file.buffer;
-    const pdfData = await pdf(dataBuffer);
-    const text = pdfData.text.replace(/\n/g, " ");
+    const data = await pdf(dataBuffer);
+    const text = data.text;
 
-    function extract(pattern, fallback = null) {
-      const match = text.match(pattern);
-      return match && match[1] ? match[1].trim() : fallback;
-    }
-
-    const teilname = extract(/(Greiferhalter[^\s]+)/i) || extract(/Benennung\s*[:=]?\s*([\w\- ]+)/i, "k.A.");
-    const zeichnung = extract(/(\b[A-Z]{2,}\d{3,}\b)/i) || extract(/Zeichnungsnummer\s*[:=]?\s*(\w+)/i, "k.A.");
-    
-let material = extract(/Material\s*[:=]?\s*([\w\.\-\/ ]+)/i)
-            || extract(/Werkstoff\s*[:=]?\s*([\w\.\-\/ ]+)/i)
-            || extract(/(1\.[0-9]{4})/)
-            || extract(/(3\.[0-9]{4})/)
-            || "stahl";
-if (material.includes("3.4365") || material.toLowerCase().includes("aluminium")) {
-  material = "aluminium";
-}
-
-    const gewichtMatch = extract(/(\d+[\.,]?\d*)\s?kg/i, null);
-    const gewicht = gewichtMatch ? parseFloat(gewichtMatch.replace(",", ".")) : null;
-
-    const durchmesser = extract(/Ø\s?(\d+[\.,]?\d*)/, null);
-    const laenge = extract(/L(?:=|\s)?(\d+[\.,]?\d*)/, null);
-
-    let masse = "nicht sicher erkannt";
-    let gewichtCalc = gewicht;
-    let x1 = 0, x2 = 0, x3 = 0;
-    let form = "k.A.";
-
-    if (durchmesser && laenge) {
-      const d = parseFloat(durchmesser.replace(",", "."));
-      const l = parseFloat(laenge.replace(",", "."));
-      const radius = d / 2;
-      const volumen = Math.PI * radius * radius * l / 1000;
-      masse = `Ø${d} × ${l} mm`;
-      
-const dichte = material.toLowerCase().includes("aluminium") ? 2.7 : 7.85;
-gewichtCalc = gewichtCalc || volumen * dichte;
-
-      x1 = d;
-      x2 = l;
-      form = "Zylinder";
-    } else if (text.match(/(\d{2,4})\s?[xX*]\s?(\d{2,4})\s?[xX*]\s?(\d{2,4})/)) {
-      const m = text.match(/(\d{2,4})\s?[xX*]\s?(\d{2,4})\s?[xX*]\s?(\d{2,4})/);
-      const [a, b, c] = [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])];
-      masse = `${a} x ${b} x ${c} mm`;
-      const volumen = (a / 1000) * (b / 1000) * (c / 1000);
-      
-const dichte = material.toLowerCase().includes("aluminium") ? 2.7 : 7.85;
-gewichtCalc = gewichtCalc || volumen * dichte;
-
-      x1 = a; x2 = b; x3 = c;
-      form = "Platte";
-    }
-
-    const kgPreise = {
-      stahl: 1.5,
-      edelstahl: 6.5,
-      aluminium: 7.0,
-      messing: 8.0,
-      kupfer: 10.0,
-      "1.4301": 6.5,
-      "1.2210": 1.5
+    const extract = (regex, fallback = null) => {
+      const match = text.match(regex);
+      return match ? match[1].trim() : fallback;
     };
 
-    const matKey = material.toLowerCase();
-    const matpreis = kgPreise[matKey] || 1.5;
-    const rüst = 60;
-    const prog = 30;
-    const laufzeit = gewichtCalc ? gewichtCalc * 2 : 1;
-    const laufzeitStd = laufzeit / 60;
-    const bearbeitung = laufzeitStd * 35;
-    const matkosten = gewichtCalc * matpreis;
-    const stück1 = ((matkosten + bearbeitung + rüst + prog) / 1) * 1.15;
-    const stück10 = ((matkosten + bearbeitung + rüst + prog) / 10) * 1.15;
-    const stück100 = ((matkosten + bearbeitung + rüst + prog) / 100) * 1.15;
+    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+    const fullText = lines.join(" ");
+
+    const filename = req.file.originalname;
+
+    const teilname = extract(/(?:Benennung|Bezeichnung)[\s:\-]*([\w\-\s\.,\(\)\/]+)/i)
+                  || extract(/\b([A-ZÄÖÜa-zäöü\-\s]{4,})\b(?=\s*\d{6,})/i)
+                  || extract(/\b([A-ZÄÖÜa-zäöü\-\s]{4,})\b(?=\s*Zeichnungsnummer)/i)
+                  || extract(/\b([\w\-\s]+)\b(?=\s*DIN)/i)
+                  || "k.A.";
+
+    const zeichnungsnummer = extract(/Zeichnungsnummer\s*[:=]?\s*([\w\-\.\/]+)/i)
+                          || extract(/Nr\.\s*([\w\-]+)/i)
+                          || extract(/([\d]{6,})/)
+                          || "k.A.";
+
+    const materialRaw = extract(/Material\s*[:=]?\s*([\w\.\-\/]+)/i)
+                     || extract(/Werkstoff\s*[:=]?\s*([\w\.\-\/]+)/i)
+                     || extract(/(1\.[0-9]{4})/)
+                     || extract(/(3\.[0-9]{4})/)
+                     || "stahl";
+
+    let material = materialRaw.toLowerCase();
+    if (material.includes("aluminium") || material.includes("3.4365") || material.includes("almg")) {
+      material = "aluminium";
+    } else if (material.includes("1.2767")) {
+      material = "werkzeugstahl";
+    } else if (material.includes("1.4301") || material.includes("va") || material.includes("v2a")) {
+      material = "edelstahl";
+    } else {
+      material = "stahl";
+    }
+
+    let dichte = 7.85;
+    if (material === "aluminium") dichte = 2.7;
+    if (material === "edelstahl") dichte = 7.9;
+    if (material === "werkzeugstahl") dichte = 7.85;
+
+    let durchmesser = parseFloat(extract(/ø\s*([0-9]+(?:[\.,][0-9]+)?)/i) || "0");
+    let laenge = parseFloat(extract(/(\d{2,4})\s*(mm)?(?=\s*[\)]?\s*$)/i) || "0");
+
+    if (durchmesser > 0 && laenge > 0) {
+      const r = durchmesser / 2 / 10; // cm
+      const h = laenge / 10; // cm
+      const volumen = Math.PI * r * r * h; // cm³
+      const gewicht = volumen * dichte / 1000; // kg
+
+      const laufzeit = Math.max(1, Math.round((gewicht * 20 + 5) * 10) / 10); // grob geschätzt
+      const kosten = gewicht * 2 + laufzeit * 1.2 + 10;
+      const preis1 = (kosten + 30).toFixed(2);
+      const preis10 = (kosten * 1.1).toFixed(2);
+      const preis100 = (kosten * 0.9).toFixed(2);
+
+      return res.json({
+        teilname,
+        zeichnungsnummer,
+        form: "Zylinder",
+        material,
+        masse: `${durchmesser} x ${laenge} mm`,
+        gewicht: `${gewicht.toFixed(3)} kg`,
+        preis1,
+        preis10,
+        preis100
+      });
+    }
 
     res.json({
-      teilname, zeichnung, material, form, masse,
-      gewicht: gewichtCalc ? gewichtCalc.toFixed(3) + " kg" : "k.A.",
-      preis: {
-        "1 Stk": stück1.toFixed(2) + " €",
-        "10 Stk": stück10.toFixed(2) + " €",
-        "100 Stk": stück100.toFixed(2) + " €"
-      }
+      teilname,
+      zeichnungsnummer,
+      material,
+      masse: "nicht erkennbar",
+      form: "k.A.",
+      gewicht: "k.A.",
+      preis1: "-",
+      preis10: "-",
+      preis100: "-"
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Analysefehler" });
+    res.status(500).json({ error: "Fehler bei der Analyse" });
   }
 });
 
-app.listen(port, () => {
-  console.log("✅ Server läuft auf Port " + port);
-});
+app.listen(10000, () => console.log("🔧 Server läuft auf Port 10000"));
